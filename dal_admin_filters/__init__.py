@@ -1,6 +1,7 @@
 # -*- encoding: utf-8 -*-
 from dal import autocomplete, forward
 from django import forms
+from django.conf import settings
 from django.contrib.admin.filters import SimpleListFilter
 from django.forms.widgets import Media, MEDIA_TYPES, media_property
 
@@ -56,16 +57,42 @@ class AutocompleteFilter(SimpleListFilter):
     def get_queryset_for_field(self, model, name):
         return getattr(model, name).get_queryset()
 
-    def _add_media(self, model_admin, widget):
+    @staticmethod
+    def get_dependency_media():
+        """
+        Scripts the widget and forward-fix.js rely on, in the order they need them.
 
-        if not hasattr(model_admin, 'Media'):
-            model_admin.__class__.Media = type('Media', (object,), dict())
-            model_admin.__class__.media = media_property(model_admin.__class__)
+        select2.full.js binds to the global jQuery, which admin's jquery.init.js removes,
+        and forward-fix.js reads django.jQuery as soon as it loads. Nothing else pins this
+        order, so without it the merged admin media can put select2 after jquery.init.js.
+        """
+        extra = '' if settings.DEBUG else '.min'
+        return Media(js=(
+            'admin/js/vendor/jquery/jquery%s.js' % extra,
+            'admin/js/vendor/select2/select2.full.js',
+            'admin/js/jquery.init.js',
+            'dal_admin_filters/js/forward-fix.js',
+        ))
+
+    def _add_media(self, model_admin, widget):
+        admin_class = model_admin.__class__
+        if 'Media' not in vars(admin_class):
+            # An inherited Media is shared with every other subclass of that parent,
+            # so give this admin its own; its media property still includes the parents' media.
+            admin_class.Media = type('Media', (object,), dict())
+            if 'media' not in vars(admin_class):
+                admin_class.media = media_property(admin_class)
 
         def _get_media(obj):
             return Media(media=getattr(obj, 'Media', None))
 
-        media = _get_media(model_admin) + widget.media + _get_media(AutocompleteFilter) + _get_media(self)
+        media = (
+            self.get_dependency_media()
+            + _get_media(model_admin)
+            + widget.media
+            + _get_media(AutocompleteFilter)
+            + _get_media(self)
+        )
 
         for name in MEDIA_TYPES:
             setattr(model_admin.Media, name, getattr(media, "_" + name))
